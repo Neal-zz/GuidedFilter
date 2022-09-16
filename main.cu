@@ -2,12 +2,14 @@
 #include "device_launch_parameters.h"
 #include "lodepng.h"
 #include "guidedFilter.cuh"
+#include "config.h"
 
 #include <stdio.h>
 #include <iostream>
 #include <chrono>
 #include <vector>
 #include <thread>
+
 
 
 /*
@@ -104,16 +106,11 @@ std::vector<unsigned char> showResult(const std::vector<float>& in,
 		result[i + 3] = 255;
 	}
 
-	//std::cout << "max:" << max << "  min:" << min << std::endl;
-
 	return result;
 }
 
 constexpr int scaleFactor = 1;
-constexpr int windowWidth = 9;  // should be odd number
-constexpr int windowHeight = 9;
-
-constexpr float epsilon = 10*10;
+constexpr float epsilon = 10 * 10;
 
 int main()
 {
@@ -132,13 +129,12 @@ int main()
 	std::vector<float> output(imSize);
 
 	// Device variabels
-	unsigned char* d_orig;
-	unsigned* d_filteringP, * d_guidedI;
+	unsigned char* d_orig, * d_filteringP, * d_guidedI;
 	float* d_ab, * d_outputQ;
 
 	CudaCall(cudaMalloc((void**)&d_orig, sizeof(unsigned char) * imSize * 4));  // 4: rgbd.
-	CudaCall(cudaMalloc((void**)&d_filteringP, sizeof(unsigned) * imSize));
-	CudaCall(cudaMalloc((void**)&d_guidedI, sizeof(unsigned) * imSize));
+	CudaCall(cudaMalloc((void**)&d_filteringP, sizeof(unsigned char) * imSize));
+	CudaCall(cudaMalloc((void**)&d_guidedI, sizeof(unsigned char) * imSize));
 	CudaCall(cudaMalloc((void**)&d_ab, sizeof(float) * imSize * 2));  // 2: ab.
 	CudaCall(cudaMalloc((void**)&d_outputQ, sizeof(float) * imSize));
 
@@ -180,11 +176,15 @@ int main()
 	CudaCall(cudaPeekAtLastError());
 	CudaCall(cudaDeviceSynchronize());
 
+	// block and thread allocation.
+	dim3 blocks((width + tileWidth - 1) / tileWidth, (height + tileHeight - 1) / tileHeight);
+	dim3 threads(aproneWidth, aproneHeight);
+
 	// calculate ak and bk for each window wk.
 	std::cout << "Calculating ak and bk...";
 	CudaCall(cudaEventRecord(start));
 
-	linearPara<<<height, width>>>(d_filteringP, d_guidedI, d_ab, width, height, windowWidth, windowHeight, epsilon);
+	linearPara<<<blocks, threads>>>(d_filteringP, d_guidedI, d_ab, width, height, epsilon);
 
 	CudaCall(cudaEventRecord(stop));
 	CudaCall(cudaEventSynchronize(stop));
@@ -194,11 +194,11 @@ int main()
 	CudaCall(cudaPeekAtLastError());
 	CudaCall(cudaDeviceSynchronize());
 
-	// image filtering
+	//// image filtering
 	std::cout << "Image Filtering...";
 	CudaCall(cudaEventRecord(start));
 
-	doFiltering_new<<<height, width>>>(d_ab, d_guidedI, d_outputQ, width, height, windowWidth, windowHeight);
+	doFiltering_new<<<blocks, threads >>>(d_ab, d_guidedI, d_outputQ, width, height);
 
 	CudaCall(cudaEventRecord(stop));
 	CudaCall(cudaEventSynchronize(stop));
