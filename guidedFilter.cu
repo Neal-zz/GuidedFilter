@@ -1,5 +1,254 @@
 ﻿#include "guidedFilter.cuh"
 
+__global__ void darkChannel(unsigned char* orig, unsigned char* dark, unsigned width, unsigned height) {
+	// shared memory.
+	__shared__ unsigned char smdark[aproneWidth * aproneHeight];
+
+	// image coordinates in orig.
+	int x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+	int y = blockIdx.y * blockDim.y + threadIdx.y;  // height.
+	// shared memory start image coordinate in orig. (may be out of image boundary.)
+	int smx_start = blockIdx.x * blockDim.x - windowR;
+	int smy_start = blockIdx.y * blockDim.y - windowR;
+
+	// index.
+	int thindex = threadIdx.y * blockDim.x + threadIdx.x;  // thread index.
+
+	// data copy.
+	for (int smindex = thindex; smindex < aproneSize; smindex += (blockDim.x * blockDim.y)) {
+		// shared memory image coordinate in orig.
+		int smx = smx_start + (smindex % aproneWidth);
+		int smy = smy_start + (smindex / aproneWidth);
+		smx = smx > 0 ? smx : 0;
+		smy = smy > 0 ? smy : 0;
+		smx = smx < (width - 1) ? smx : (width - 1);
+		smy = smy < (height - 1) ? smy : (height - 1);
+
+		int smindex4 = smy * (width * 4) + smx * 4;  // shared memory index for 4 channels image.
+		unsigned char temp = 255;
+		for (int ci = 0; ci < 3; ci++) {
+			unsigned char temp2 = orig[smindex4 + ci];
+			if (temp2 < temp) {
+				temp = temp2;
+			}
+		}
+		smdark[smindex] = temp;
+	}
+	__syncthreads();
+
+	// boundary checking.
+	if ((blockIdx.x * blockDim.x + threadIdx.x) >= width ||
+		(blockIdx.y * blockDim.y + threadIdx.y) >= height)
+		return;
+
+	// miniumn filter.
+	unsigned char temp = 255;
+	for (int dy = -windowR; dy <= windowR; dy++) {
+		for (int dx = -windowR; dx <= windowR; dx++) {
+			unsigned char temp2 = smdark[(windowR + threadIdx.y + dy) * aproneWidth + (windowR + threadIdx.x + dx)];
+			if (temp2 < temp) {
+				temp = temp2;
+			}
+		}
+	}
+	dark[y * width + x] = temp;
+
+	return;
+}
+
+__global__ void subHist(unsigned char* dark, unsigned* subHist, unsigned width, unsigned height) {
+	// shared memory.
+	__shared__ unsigned local_subHist[nbins];
+
+	// index.
+	unsigned index = threadIdx.y * blockDim.x + threadIdx.x;  // thread index.
+	unsigned x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+	unsigned y = blockIdx.y * blockDim.y + threadIdx.y;  // height.
+	unsigned imIndex = y * width + x;
+
+	// data initialization.
+	for (unsigned bin = index; bin < nbins; bin += (blockDim.x * blockDim.y)) {
+		local_subHist[bin] = 0;
+	}
+	__syncthreads();
+
+	// boundary checking.
+	if (x >= width || y >= height)
+		return;
+
+	// calculate subHist.
+	unsigned char pv = dark[imIndex];
+	atomicAdd(&local_subHist[pv], 1);
+	__syncthreads();
+
+	// data copy.
+	unsigned threadsRemain_w = (blockIdx.x + 1) * blockDim.x - width;
+	threadsRemain_w = threadsRemain_w > 0 ? (blockDim.x - threadsRemain_w) : blockDim.x;
+	unsigned threadsRemain_h = (blockIdx.y + 1) * blockDim.y - height;
+	threadsRemain_h = threadsRemain_h > 0 ? (blockDim.y - threadsRemain_h) : blockDim.y;
+	for (unsigned bin = index; bin < nbins; bin += (threadsRemain_w * threadsRemain_h)) {
+		subHist[(blockIdx.y * gridDim.x + blockIdx.x) * nbins + bin] = local_subHist[bin];
+	}
+	
+	return;
+}
+
+__global__ void subHist_2(unsigned char* dark, unsigned* subHist, unsigned width, unsigned height) {
+	// shared memory.
+	__shared__ unsigned local_subHist[nbins];
+
+	// index.
+	unsigned index = threadIdx.x;  // thread index.
+	unsigned x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+
+	// data initialization.
+	for (unsigned bin = index; bin < nbins; bin += blockDim.x) {
+		local_subHist[bin] = 0;
+	}
+	__syncthreads();
+
+	// boundary checking.
+	if (x >= width)
+		return;
+
+	// calculate subHist.
+	unsigned char pv = 0;
+	for (int i = 0; i < height; i++) {
+		pv = dark[width * i + x];
+		atomicAdd(&local_subHist[pv], 1);
+	}
+	__syncthreads();
+
+	// data copy. (some threads has been return!)
+	unsigned threadsRemain = (blockIdx.x + 1) * blockDim.x - width;
+	threadsRemain = threadsRemain > 0 ? (blockDim.x - threadsRemain) : blockDim.x;
+	for (unsigned bin = index; bin < nbins; bin += threadsRemain) {
+		subHist[blockIdx.x * nbins + bin] = local_subHist[bin];
+	}
+
+	return;
+}
+
+__global__ void sumHist(unsigned* subHist, unsigned* hist, unsigned subHistSize) {
+	// index.
+	unsigned index = threadIdx.x;  // hist index.
+
+	// boundary checking.
+	if ((index > nbins))
+		return;
+
+	// sum.
+	for (int i = index; i < nbins; i += blockDim.x) {
+		unsigned sum = 0;
+		for (int j = i; j < subHistSize; j += nbins) {
+			sum += subHist[j];
+		}
+		hist[i] = sum;
+	}
+
+	return;
+}
+
+__global__ void getAcRow(unsigned char* orig, unsigned char* Idark, unsigned char* AcRow, unsigned char colorThresh, unsigned width, unsigned height) {
+	// index.
+	unsigned x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+
+	// boundary checking.
+	if (x >= width)
+		return;
+
+	// find AcRow for each column.
+	unsigned char local_Ac[3] = {0,0,0};
+	for (int y = 0; y < height; y++) {
+		if (Idark[y * width + x] >= colorThresh) {
+			for (int c = 0; c < 3; c++) {
+				unsigned char temp = orig[y * width * 4 + x * 4 + c];
+				if ( temp > local_Ac[c]) {
+					local_Ac[c] = temp;
+				}
+			}
+		}
+	}
+	AcRow[x * 3] = local_Ac[0];
+	AcRow[x * 3 + 1] = local_Ac[1];
+	AcRow[x * 3 + 2] = local_Ac[2];
+
+	return;
+}
+
+__global__ void getAc(unsigned char* AcRow, unsigned char* Ac, unsigned width) {
+	// index.
+	unsigned c = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+
+	// boundary checking.
+	if (c >= 3)
+		return;
+
+	// find AcRow for each column.
+	unsigned char local_Ac = 0;
+	for (int x = 0; x < width; x++) {
+		unsigned char temp = AcRow[x * 3 + c];
+		if (temp > local_Ac) {
+			local_Ac = temp;
+		}
+
+	}
+	Ac[c] = local_Ac;
+
+	return;
+}
+
+__global__ void getttilde(unsigned char* orig, float* ttilde, unsigned char* Ac, unsigned width, unsigned height) {
+	// shared memory.
+	__shared__ float smt[aproneWidth * aproneHeight];
+
+	// image coordinates in fP and gI.
+	int x = blockIdx.x * tileWidth + threadIdx.x - windowR;  // width.
+	int y = blockIdx.y * tileHeight + threadIdx.y - windowR;  // height.
+	x = x > 0 ? x : 0;
+	x = x < (width - 1) ? x : (width - 1);
+	y = y > 0 ? y : 0;
+	y = y < (height - 1) ? y : (height - 1);
+
+	// index.
+	unsigned index = y * width + x;
+	unsigned index4 = y * (width * 4) + x * 4;
+	unsigned smindex = threadIdx.y * blockDim.x + threadIdx.x;
+
+	// data copy.
+	float local_Ac[3];
+	local_Ac[0] = static_cast<float>(Ac[0]); static_cast<float>(local_Ac[1] = Ac[1]); static_cast<float>(local_Ac[2] = Ac[2]);
+	float temp = static_cast<float>(orig[index4]) / local_Ac[0];
+	for (int ci = 1; ci < 3; ci++) {
+		float temp2 = static_cast<float>(orig[index4 + ci]) / local_Ac[ci];
+		if (temp2 < temp) {
+			temp = temp2;
+		}
+	}
+	smt[smindex] = temp;
+	__syncthreads();
+
+	// aprone area checking
+	if (threadIdx.x < windowR || threadIdx.x >= (aproneWidth - windowR) ||
+		threadIdx.y < windowR || threadIdx.y >= (aproneHeight - windowR) ||
+		(blockIdx.x * tileWidth + threadIdx.x - windowR) >= width ||
+		(blockIdx.y * tileHeight + threadIdx.y - windowR) >= height)
+		return;
+
+	// miniumn filter.
+	for (int dy = -windowR; dy <= windowR; dy++) {
+		for (int dx = -windowR; dx <= windowR; dx++) {
+			float temp2 = smt[smindex + (dy * blockDim.x) + dx];
+			if (temp2 < temp) {
+				temp = temp2;
+			}
+		}
+	}
+	ttilde[index] = 1.0 - static_cast<float>(ttilde_w) * temp;
+
+	return;
+}
+
 __global__ void ScaleAndGray(unsigned char* orig, unsigned char* gray, unsigned width, unsigned height, int scaleFactor) {
 	int i = blockIdx.x;
 	int j = threadIdx.x;
@@ -20,10 +269,10 @@ __global__ void ScaleAndGray(unsigned char* orig, unsigned char* gray, unsigned 
 	return;
 }
 
-__global__ void linearPara(unsigned char* filteringP, unsigned char* guidedI, float* ab, int width, int height, float epsilon) {
+__global__ void linearPara(float* filteringP, unsigned char* guidedI, float* ab, int width, int height, float epsilon) {
 	
 	// shared memory.
-	__shared__ unsigned char fPsm[aproneWidth * aproneHeight];
+	__shared__ float fPsm[aproneWidth * aproneHeight];
 	__shared__ unsigned char gIsm[aproneWidth * aproneHeight];
 
 	// image coordinates in fP and gI.
@@ -55,7 +304,7 @@ __global__ void linearPara(unsigned char* filteringP, unsigned char* guidedI, fl
 	for (int dy = -windowR; dy <= windowR; dy++) {
 		for (int dx = -windowR; dx <= windowR; dx++) {
 			float temp1 = static_cast<float>(gIsm[smindex + (dy * blockDim.x) + dx]);
-			float temp2 = static_cast<float>(fPsm[smindex + (dy * blockDim.x) + dx]);
+			float temp2 = fPsm[smindex + (dy * blockDim.x) + dx];
 			miu += temp1;
 			pk += temp2;
 			Ip += temp1 * temp2;
