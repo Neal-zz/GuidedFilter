@@ -28,16 +28,19 @@ __global__ void getAcRow(unsigned char* orig, unsigned char* Idark, unsigned cha
 __global__ void getAc(unsigned char* AcRow, unsigned char* Ac, unsigned width);
 
 /* get the t_tilde.*/
-__global__ void getttilde(unsigned char* orig, float* ttilde, unsigned char* Ac, unsigned width, unsigned height);
+__global__ void getttilde(unsigned char* orig, float* ttilde, unsigned char* Ac, unsigned width, unsigned height, float w);
 
 /* input initial width and height.*/
-__global__ void ScaleAndGray(unsigned char* orig, unsigned char* gray, unsigned width, unsigned height, int scaleFactor);
+__global__ void gray(unsigned char* orig, unsigned char* gray, unsigned width, unsigned height);
 
 /* calculate ak and bk for each window wk.*/
 __global__ void linearPara(float* filteringP, unsigned char* guidedI, float* ab, int width, int height, float epsilon);
 
 /* do filtering for each qi*/
 __global__ void doFiltering_new(float* ab, unsigned char* guidedI, float* outputQ, int width, int height);
+
+/* get the J*/
+__global__ void get_J(unsigned char* orig, float* ttilde2, unsigned char* output, unsigned char* Ac, unsigned width, unsigned height, float t0);
 
 ///* do filtering for each ak and bk.
 //(This function is bad. Maybe we shouldn't change multiple pixels in one thread?)*/

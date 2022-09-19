@@ -2,7 +2,7 @@
 
 __global__ void darkChannel(unsigned char* orig, unsigned char* dark, unsigned width, unsigned height) {
 	// shared memory.
-	__shared__ unsigned char smdark[aproneWidth * aproneHeight];
+	__shared__ unsigned char smdark[aproneSize];
 
 	// image coordinates in orig.
 	int x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
@@ -37,8 +37,7 @@ __global__ void darkChannel(unsigned char* orig, unsigned char* dark, unsigned w
 	__syncthreads();
 
 	// boundary checking.
-	if ((blockIdx.x * blockDim.x + threadIdx.x) >= width ||
-		(blockIdx.y * blockDim.y + threadIdx.y) >= height)
+	if (x >= width || y >= height)
 		return;
 
 	// miniumn filter.
@@ -198,124 +197,132 @@ __global__ void getAc(unsigned char* AcRow, unsigned char* Ac, unsigned width) {
 	return;
 }
 
-__global__ void getttilde(unsigned char* orig, float* ttilde, unsigned char* Ac, unsigned width, unsigned height) {
+__global__ void getttilde(unsigned char* orig, float* ttilde, unsigned char* Ac, unsigned width, unsigned height, float w) {
 	// shared memory.
 	__shared__ float smt[aproneWidth * aproneHeight];
 
-	// image coordinates in fP and gI.
-	int x = blockIdx.x * tileWidth + threadIdx.x - windowR;  // width.
-	int y = blockIdx.y * tileHeight + threadIdx.y - windowR;  // height.
-	x = x > 0 ? x : 0;
-	x = x < (width - 1) ? x : (width - 1);
-	y = y > 0 ? y : 0;
-	y = y < (height - 1) ? y : (height - 1);
+	// image coordinates in orig.
+	int x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+	int y = blockIdx.y * blockDim.y + threadIdx.y;  // height.
+	// shared memory start image coordinate in orig. (may be out of image boundary.)
+	int smx_start = blockIdx.x * blockDim.x - windowR;
+	int smy_start = blockIdx.y * blockDim.y - windowR;
 
 	// index.
-	unsigned index = y * width + x;
-	unsigned index4 = y * (width * 4) + x * 4;
-	unsigned smindex = threadIdx.y * blockDim.x + threadIdx.x;
+	int thindex = threadIdx.y * blockDim.x + threadIdx.x;  // thread index.
 
 	// data copy.
 	float local_Ac[3];
 	local_Ac[0] = static_cast<float>(Ac[0]); static_cast<float>(local_Ac[1] = Ac[1]); static_cast<float>(local_Ac[2] = Ac[2]);
-	float temp = static_cast<float>(orig[index4]) / local_Ac[0];
-	for (int ci = 1; ci < 3; ci++) {
-		float temp2 = static_cast<float>(orig[index4 + ci]) / local_Ac[ci];
-		if (temp2 < temp) {
-			temp = temp2;
+	for (int smindex = thindex; smindex < aproneSize; smindex += (blockDim.x * blockDim.y)) {
+		// shared memory image coordinate in orig.
+		int smx = smx_start + (smindex % aproneWidth);
+		int smy = smy_start + (smindex / aproneWidth);
+		smx = smx > 0 ? smx : 0;
+		smy = smy > 0 ? smy : 0;
+		smx = smx < (width - 1) ? smx : (width - 1);
+		smy = smy < (height - 1) ? smy : (height - 1);
+
+		int smindex4 = smy * (width * 4) + smx * 4;  // shared memory index for 4 channels image.
+		float temp = 5.0;
+		for (int ci = 0; ci < 3; ci++) {
+			float temp2 = orig[smindex4 + ci] / local_Ac[ci];
+			if (temp2 < temp) {
+				temp = temp2;
+			}
 		}
+		smt[smindex] = temp;
 	}
-	smt[smindex] = temp;
 	__syncthreads();
 
-	// aprone area checking
-	if (threadIdx.x < windowR || threadIdx.x >= (aproneWidth - windowR) ||
-		threadIdx.y < windowR || threadIdx.y >= (aproneHeight - windowR) ||
-		(blockIdx.x * tileWidth + threadIdx.x - windowR) >= width ||
-		(blockIdx.y * tileHeight + threadIdx.y - windowR) >= height)
+	// boundary checking.
+	if (x >= width || y >= height)
 		return;
 
 	// miniumn filter.
+	float temp = 5.0;
 	for (int dy = -windowR; dy <= windowR; dy++) {
 		for (int dx = -windowR; dx <= windowR; dx++) {
-			float temp2 = smt[smindex + (dy * blockDim.x) + dx];
+			float temp2 = smt[(windowR + threadIdx.y + dy) * aproneWidth + (windowR + threadIdx.x + dx)];
 			if (temp2 < temp) {
 				temp = temp2;
 			}
 		}
 	}
-	ttilde[index] = 1.0 - static_cast<float>(ttilde_w) * temp;
+	ttilde[y * width + x] = 1.0 - static_cast<float>(w) * temp;
 
 	return;
 }
 
-__global__ void ScaleAndGray(unsigned char* orig, unsigned char* gray, unsigned width, unsigned height, int scaleFactor) {
-	int i = blockIdx.x;
-	int j = threadIdx.x;
+__global__ void gray(unsigned char* orig, unsigned char* gray, unsigned width, unsigned height) {
+	int i = blockIdx.x;  // height
+	int j = threadIdx.x;  // width
 
 	if (i >= height || j >= width)
 		return;
 
-	int newWidth = width / scaleFactor;
-
-	int x = (scaleFactor * i - 1 * (i > 0));
-	int y = (scaleFactor * j - 1 * (j > 0));
-
-	float temp = 0.3 * static_cast<float>(orig[x * (4 * width) + 4 * y]) +
-		0.59 * static_cast<float>(orig[x * (4 * width) + 4 * y + 1]) +
-		0.11 * static_cast<float>(orig[x * (4 * width) + 4 * y + 2]);
-	gray[i * newWidth + j] = static_cast<unsigned char>(temp);
-		
+	float temp = 0.299 * static_cast<float>(orig[i * (4 * width) + 4 * j]) +
+		0.587 * static_cast<float>(orig[i * (4 * width) + 4 * j + 1]) +
+		0.114 * static_cast<float>(orig[i * (4 * width) + 4 * j + 2]);
+	gray[i * width + j] = static_cast<unsigned char>(temp);
+	
 	return;
 }
 
 __global__ void linearPara(float* filteringP, unsigned char* guidedI, float* ab, int width, int height, float epsilon) {
 	
 	// shared memory.
-	__shared__ float fPsm[aproneWidth * aproneHeight];
-	__shared__ unsigned char gIsm[aproneWidth * aproneHeight];
+	__shared__ float fPsm[guided_aproneSize];
+	__shared__ unsigned char gIsm[guided_aproneSize];
 
 	// image coordinates in fP and gI.
-	int x = blockIdx.x * tileWidth + threadIdx.x - windowR;  // width.
-	int y = blockIdx.y * tileHeight + threadIdx.y - windowR;  // height.
-	x = x > 0 ? x : 0;
-	x = x < (width - 1) ? x : (width - 1);
-	y = y > 0 ? y : 0;
-	y = y < (height - 1) ? y : (height - 1);
+	int x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+	int y = blockIdx.y * blockDim.y + threadIdx.y;  // height.
+	// shared memory start image coordinate in orig. (may be out of image boundary.)
+	int smx_start = blockIdx.x * blockDim.x - guided_windowR;
+	int smy_start = blockIdx.y * blockDim.y - guided_windowR;
 	
 	// index.
-	unsigned index = y * width + x;  // image index.
-	unsigned smindex = threadIdx.y * blockDim.x + threadIdx.x;  // shared memory index.
+	int thindex = threadIdx.y * blockDim.x + threadIdx.x;  // thread index.
+	int outindex = y * width + x;  // image index.
 
 	// data copy.
-	fPsm[smindex] = filteringP[index];
-	gIsm[smindex] = guidedI[index];
+	for (int smindex = thindex; smindex < guided_aproneSize; smindex += (blockDim.x * blockDim.y)) {
+		// shared memory image coordinate in orig.
+		int smx = smx_start + (smindex % guided_aproneWidth);
+		int smy = smy_start + (smindex / guided_aproneWidth);
+		smx = smx > 0 ? smx : 0;
+		smy = smy > 0 ? smy : 0;
+		smx = smx < (width - 1) ? smx : (width - 1);
+		smy = smy < (height - 1) ? smy : (height - 1);
+
+		int imindex = smy * width + smx;  // shared memory index for 1 channels image.
+		fPsm[smindex] = filteringP[imindex];
+		gIsm[smindex] = guidedI[imindex];
+	}
 	__syncthreads();
 
-	// aprone area checking
-	if (threadIdx.x < windowR || threadIdx.x >= (aproneWidth - windowR) ||
-		threadIdx.y < windowR || threadIdx.y >= (aproneHeight - windowR) ||
-		(blockIdx.x * tileWidth + threadIdx.x - windowR) >= width ||
-		(blockIdx.y * tileHeight + threadIdx.y - windowR) >= height)
+	// boundary checking.
+	if (x >= width || y >= height)
 		return;
 
 	// (use only other pixel value.)
 	float miu = 0.0, pk = 0.0, Ip = 0.0, miu2 = 0.0;
-	for (int dy = -windowR; dy <= windowR; dy++) {
-		for (int dx = -windowR; dx <= windowR; dx++) {
-			float temp1 = static_cast<float>(gIsm[smindex + (dy * blockDim.x) + dx]);
-			float temp2 = fPsm[smindex + (dy * blockDim.x) + dx];
+	for (int dy = -guided_windowR; dy <= guided_windowR; dy++) {
+		for (int dx = -guided_windowR; dx <= guided_windowR; dx++) {
+			float temp1 = static_cast<float>(gIsm[(guided_windowR + threadIdx.y + dy) * guided_aproneWidth + (guided_windowR + threadIdx.x + dx)]);
+			float temp2 = fPsm[(guided_windowR + threadIdx.y + dy) * guided_aproneWidth + (guided_windowR + threadIdx.x + dx)];
 			miu += temp1;
 			pk += temp2;
 			Ip += temp1 * temp2;
 			miu2 += temp1 * temp1;
 		}
 	}
-	float num = static_cast<float>(windowSize);
+	float num = static_cast<float>(guided_windowSize);
 	float ak = (Ip / num - (miu / num) * (pk / num)) / (miu2 / num - (miu / num) * (miu / num) + epsilon);
 	float bk = (pk / num) - ak * (miu / num);
-	ab[index * 2] = ak;
-	ab[index * 2 + 1] = bk;
+	ab[outindex * 2] = ak;
+	ab[outindex * 2 + 1] = bk;
 
 	return;
 }
@@ -389,50 +396,77 @@ __global__ void linearPara(float* filteringP, unsigned char* guidedI, float* ab,
 __global__ void doFiltering_new(float* ab, unsigned char* guidedI, float* outputQ, int width, int height) {
 
 	// shared memory.
-	__shared__ float aksm[aproneWidth * aproneHeight];
-	__shared__ float bksm[aproneWidth * aproneHeight];
+	__shared__ float aksm[guided_aproneSize];
+	__shared__ float bksm[guided_aproneSize];
 
 	// image coordinates in fP and gI.
-	int x = blockIdx.x * tileWidth + threadIdx.x - windowR;  // width.
-	int y = blockIdx.y * tileHeight + threadIdx.y - windowR;  // height.
-	x = x > 0 ? x : 0;
-	x = x < (width - 1) ? x : (width - 1);
-	y = y > 0 ? y : 0;
-	y = y < (height - 1) ? y : (height - 1);
+	int x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+	int y = blockIdx.y * blockDim.y + threadIdx.y;  // height.
+	// shared memory start image coordinate in orig. (may be out of image boundary.)
+	int smx_start = blockIdx.x * blockDim.x - guided_windowR;
+	int smy_start = blockIdx.y * blockDim.y - guided_windowR;
 
 	// index.
-	unsigned index = y * width + x;  // image index.
-	unsigned smindex = threadIdx.y * blockDim.x + threadIdx.x;  // shared memory index.
+	int thindex = threadIdx.y * blockDim.x + threadIdx.x;  // thread index.
+	int outindex = y * width + x;  // image index.
 
 	// data copy.
-	aksm[smindex] = ab[index * 2];
-	bksm[smindex] = ab[index * 2 + 1];
+	for (int smindex = thindex; smindex < guided_aproneSize; smindex += (blockDim.x * blockDim.y)) {
+		// shared memory image coordinate in orig.
+		int smx = smx_start + (smindex % guided_aproneWidth);
+		int smy = smy_start + (smindex / guided_aproneWidth);
+		smx = smx > 0 ? smx : 0;
+		smy = smy > 0 ? smy : 0;
+		smx = smx < (width - 1) ? smx : (width - 1);
+		smy = smy < (height - 1) ? smy : (height - 1);
+
+		int imindex = smy * width * 2 + smx * 2;  // shared memory index for ab.
+		aksm[smindex] = ab[imindex];
+		bksm[smindex] = ab[imindex + 1];
+	}
 	__syncthreads();
 
-	// aprone area checking
-	if (threadIdx.x < windowR || threadIdx.x >= (aproneWidth - windowR) ||
-		threadIdx.y < windowR || threadIdx.y >= (aproneHeight - windowR) ||
-		(blockIdx.x * tileWidth + threadIdx.x - windowR) >= width ||
-		(blockIdx.y * tileHeight + threadIdx.y - windowR) >= height)
+	// boundary checking.
+	if (x >= width || y >= height)
 		return;
 
 	/* start filtering.*/
-	float Iij = static_cast<float>(guidedI[index]);
+	float Iij = static_cast<float>(guidedI[outindex]);
 	float result = 0.0;
 	// (use only other pixel value.)
-	for (int dy = -windowR; dy <= windowR; dy++) {
-		for (int dx = -windowR; dx <= windowR; dx++) {
-			result += aksm[smindex + (dy * blockDim.x) + dx] * Iij + bksm[smindex + (dy * blockDim.x) + dx];
+	for (int dy = -guided_windowR; dy <= guided_windowR; dy++) {
+		for (int dx = -guided_windowR; dx <= guided_windowR; dx++) {
+			result += (aksm[(guided_windowR + threadIdx.y + dy) * guided_aproneWidth + (guided_windowR + threadIdx.x + dx)] * Iij +
+				bksm[(guided_windowR + threadIdx.y + dy) * guided_aproneWidth + (guided_windowR + threadIdx.x + dx)]);
 		}
 	}
+	outputQ[outindex] = result / static_cast<float>(guided_windowSize);
 
-	// normalize.
-	//int width_max = (width-1) < (j + (windowWidth - 1) / 2) ? (width-1) : (j + (windowWidth - 1) / 2);
-	//int width_min = 0 > (j - (windowWidth - 1) / 2) ? 0 : (j - (windowWidth - 1) / 2);
-	//int height_max = (height-1) < (i + (windowHeight - 1) / 2) ? (height-1) : (i + (windowHeight - 1) / 2);
-	//int height_min = 0 > (i - (windowHeight - 1) / 2) ? 0 : (i - (windowHeight - 1) / 2);
-	//int w_num = (width_max - width_min + 1) * (height_max - height_min + 1);
-	outputQ[index] = result / static_cast<float>(windowSize);
 	return;
 }
+
+__global__ void get_J(unsigned char* orig, float* ttilde2, unsigned char* output, unsigned char* Ac, unsigned width, unsigned height, float t0) {
+	// image coordinates.
+	int x = blockIdx.x * blockDim.x + threadIdx.x;  // width.
+	int y = blockIdx.y * blockDim.y + threadIdx.y;  // height.
+													
+	// index.
+	int thindex = y * width + x;  // image index.
+
+	// boundary checking.
+	if (x >= width || y >= height)
+		return;
+
+	float local_t = ttilde2[thindex] > t0 ? ttilde2[thindex] : t0;
+	for (int ch = 0; ch < 3; ch++) {
+		float temp = static_cast<float>(Ac[ch]);
+		float temp2 = (static_cast<float>(orig[thindex * 4 + ch]) - temp) / local_t + temp;
+		output[thindex * 3 + ch] = static_cast<unsigned char>(temp2);
+	}
+
+	return;
+}
+
+
+
 
