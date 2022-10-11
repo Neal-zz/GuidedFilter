@@ -215,6 +215,20 @@ void CudaCall(const cudaError_t& status) {
 	}
 }
 
+// float: 0~1.
+std::vector<unsigned char> showResult_float(const std::vector<float>& in,
+	const unsigned width, const unsigned height) {
+	std::vector<unsigned char> result(width * height * 4);
+
+	for (int i = 0; i < width * height * 4; i += 4) {
+		float temp = in[i / 4] * 255.0;
+		result[i] = result[i + 1] = result[i + 2] = static_cast<unsigned char>(temp);
+		result[i + 3] = 255;
+	}
+
+	return result;
+}
+
 std::vector<unsigned char> showResult(const std::vector<unsigned char>& in,
 	const unsigned width, const unsigned height) {
 	std::vector<unsigned char> result(width * height * 4);
@@ -401,6 +415,10 @@ int main()
 	CudaCall(cudaPeekAtLastError());
 	CudaCall(cudaDeviceSynchronize());
 
+	std::vector<float> ttilde_output(imSize);
+	CudaCall(cudaMemcpy(&ttilde_output[0], d_ttilde, sizeof(ttilde_output[0]) * imSize, cudaMemcpyDeviceToHost));
+	lodepng::encode("ttilde_output.png", showResult_float(ttilde_output, width, height), width, height);
+
 	// test.
 	//std::vector<float> ttilde_test(imSize);
 	//std::vector<unsigned char> Ac_test(3);
@@ -454,6 +472,10 @@ int main()
 
 	CudaCall(cudaPeekAtLastError());
 	CudaCall(cudaDeviceSynchronize());
+
+	std::vector<float> ttilde2_output(imSize);
+	CudaCall(cudaMemcpy(&ttilde2_output[0], d_ttilde2, sizeof(ttilde2_output[0])* imSize, cudaMemcpyDeviceToHost));
+	lodepng::encode("ttilde2_output.png", showResult_float(ttilde2_output, width, height), width, height);
 
 	// calculate J
 	std::cout << "Calculating J...";
