@@ -8,6 +8,8 @@
 
 <!-- /code_chunk_output -->
 
+<font color=OrangeRed>本项目结合引导图像滤波实现了图像去雾。CUDA 版本。</font>
+
 ## Single Image Haze Removal Using Dark Channel Prior
 
 https://blog.csdn.net/qq_27590277/article/details/106264043
@@ -18,7 +20,7 @@ __暗通道先验：__ 在绝大多数非天空的局部区域里，某一些像
 
 $$J^{dark}(\boldsymbol{x})= \min_{\boldsymbol{y}\in \Omega(\boldsymbol{x})} (\min_{c\in \{r,g,b\}} J^c (\boldsymbol{y})) \to 0$$
 
-__但是__ 有雾图的暗通道不趋于 0。
+__但是__ 有雾处的暗通道不趋于 0。
 
 |原始图像|暗通道图|
 |---|---|
