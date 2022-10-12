@@ -89,6 +89,9 @@ $$q_i = \frac{1}{\omega} \sum_{k|i\in\omega_k}(a_kI_i+b_k)$$
 去雾耗时 __10.6 ms__（窗口大小 $9\times 9$）；
 引导图像滤波耗时 __11.2 ms__（窗口大小 $33\times 33$）。
 
+在做 CUDA 统计直方图时，参考了这篇文章：
+https://zhuanlan.zhihu.com/p/104440680
+
 |有雾图|去雾图|
 |---|---|
 |<img src="/img/fog0.png" width=100%>|<img src="/img/fog0_out.png" width=100%>|
